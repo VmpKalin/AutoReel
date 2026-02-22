@@ -12,7 +12,6 @@ Fully automated video processing pipeline: audio enhancement → transcription �
 - 📝 **Burned-in Subtitles** — Auto-scaled, styled subtitles rendered directly into the video via MoviePy
 - 📐 **Format Conversion** — Convert to any aspect ratio: 9:16, 16:9, 1:1, 4:5
 - 📱 **Social Media Metadata** — Claude AI generates optimized titles, captions and hashtags for Instagram & TikTok
-- 🔇 **Watermark Removal** — Automatically detects and removes Auphonic free-tier audio watermark
 
 ---
 
@@ -80,7 +79,6 @@ python3 pipeline.py my_video.mov -o ./results
 |------|-------------|
 | `audio` | Extracts audio track via ffmpeg |
 | `enhance` | Enhances audio via Auphonic API (denoising, normalization) |
-| `remove_watermark` | Detects and removes Auphonic free-tier watermark from audio |
 | `merge` | Replaces original audio in video with enhanced version |
 | `transcribe` | Transcribes with WhisperX using word-level timestamps |
 | `fix` | Corrects grammar and punctuation via local Ollama model |
@@ -95,7 +93,6 @@ python3 pipeline.py my_video.mov -o ./results
 ```env
 # ─── Auphonic ────────────────────────────────────
 AUPHONIC_API_KEY=your_auphonic_api_key
-REMOVE_AUPHONIC_WATERMARK=true
 
 # ─── Anthropic Claude ────────────────────────────
 ANTHROPIC_API_KEY=your_anthropic_api_key
@@ -124,7 +121,6 @@ CONVERT_TO_1080P=true      # convert HEVC/4K to h264 1080p for processing
 output/
 ├── audio_original.wav        # Extracted audio
 ├── audio_enhanced.wav        # Enhanced audio (Auphonic)
-├── audio_trimmed.wav         # Audio with watermark removed
 ├── video_enhanced.mp4        # Video with enhanced audio
 ├── video_h264.mp4            # h264 converted for subtitle rendering
 ├── transcript_raw.json       # Raw transcript with timestamps (JSON)
