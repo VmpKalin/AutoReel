@@ -1,159 +1,197 @@
-# 🎬 Video Processing Pipeline
+# 🎬 ClipForge — Automated Video Processing Pipeline
 
-Повна автоматизація обробки відео: аудіо → покращення звуку → транскрипція → субтитри → метадані.
-
-## 📋 Що робить
-
-| Крок | Що відбувається |
-|------|----------------|
-| `audio` | Витягує аудіодоріжку через ffmpeg |
-| `enhance` | Покращує звук через Auphonic API |
-| `merge` | Замінює аудіо у відео |
-| `transcribe` | Транскрибує через WhisperX → зберігає локально |
-| `fix` | Виправляє граматику та пунктуацію через Claude |
-| `subtitles` | Генерує .srt + .ass та накладає на відео |
-| `format` | Форматує відео (16:9, 9:16, 1:1) |
-| `metadata` | Claude генерує назву, підпис, хештеги для Instagram + TikTok |
+Fully automated video processing pipeline: audio enhancement → transcription → subtitles → formatting → social media metadata.
 
 ---
 
-## ⚡ Швидкий старт
+## ✨ Features
 
-### 1. Встановлення ffmpeg
+- 🔊 **Audio Enhancement** — Noise reduction and loudness normalization via Auphonic API
+- 🎙️ **Accurate Transcription** — WhisperX with word-level timestamps for frame-perfect subtitles
+- ✍️ **AI Text Correction** — Local Ollama model fixes grammar and punctuation without sending data to the cloud
+- 📝 **Burned-in Subtitles** — Auto-scaled, styled subtitles rendered directly into the video via MoviePy
+- 📐 **Format Conversion** — Convert to any aspect ratio: 9:16, 16:9, 1:1, 4:5
+- 📱 **Social Media Metadata** — Claude AI generates optimized titles, captions and hashtags for Instagram & TikTok
+- 🔇 **Watermark Removal** — Automatically detects and removes Auphonic free-tier audio watermark
+
+---
+
+## 🛠️ Requirements
+
+- Python 3.10+
+- ffmpeg
+- Ollama (for local AI text correction)
 
 ```bash
-sudo apt install ffmpeg          # Ubuntu/Debian
-brew install ffmpeg              # macOS
+# macOS
+brew install ffmpeg
+brew install ollama
+
+# Ubuntu/Debian
+sudo apt install ffmpeg
 ```
 
-### 2. Створення Python venv
+---
+
+## ⚡ Quick Start
+
+### 1. Clone and set up environment
 
 ```bash
-# Створюємо віртуальне середовище
 python3 -m venv venv
+source venv/bin/activate        # macOS / Linux
+# venv\Scripts\activate         # Windows
 
-# Активуємо
-source venv/bin/activate         # macOS / Linux
-venv\Scripts\activate            # Windows
-
-# Встановлюємо залежності
 pip install -r requirements.txt
 ```
 
-> ⚠️ Завжди активуй venv перед запуском: `source venv/bin/activate`
+### 2. Pull local AI model
 
-### 3. Налаштування
+```bash
+brew services start ollama      # run Ollama in background on Mac
+ollama pull llama3.1:8b         # ~5GB download
+```
+
+### 3. Configure
 
 ```bash
 cp .env.example .env
-# Відкрий .env та заповни API ключі
+# Fill in your API keys
 ```
 
-### 4. Запуск
+### 4. Run
 
 ```bash
-# Повний пайплайн
-python pipeline.py my_video.mp4
+# Full pipeline
+python3 pipeline.py my_video.mov
 
-# Вказати директорію виводу
-python pipeline.py my_video.mp4 -o ./results
+# From a specific step onwards
+python3 pipeline.py my_video.mov --steps fix subtitles format metadata
 
-# Тільки певні кроки
-python pipeline.py my_video.mp4 --steps transcribe fix subtitles
-
-# Тільки транскрипція без решти
-python pipeline.py my_video.mp4 --steps audio transcribe
-
-# Без покращення звуку (якщо немає Auphonic)
-python pipeline.py my_video.mp4 --steps audio merge transcribe fix subtitles format metadata
+# Custom output directory
+python3 pipeline.py my_video.mov -o ./results
 ```
 
 ---
 
-## 🔑 API ключі
+## 📋 Pipeline Steps
 
-| Сервіс | Де взяти | Безкоштовно? |
-|--------|----------|--------------|
-| **Auphonic** | https://auphonic.com → Account → API | 2 год/місяць |
-| **Anthropic** | https://console.anthropic.com → API Keys | Платний (~$0.01/відео) |
-
-> WhisperX — повністю безкоштовний, але потребує Python + (бажано GPU)
+| Step | What it does |
+|------|-------------|
+| `audio` | Extracts audio track via ffmpeg |
+| `enhance` | Enhances audio via Auphonic API (denoising, normalization) |
+| `remove_watermark` | Detects and removes Auphonic free-tier watermark from audio |
+| `merge` | Replaces original audio in video with enhanced version |
+| `transcribe` | Transcribes with WhisperX using word-level timestamps |
+| `fix` | Corrects grammar and punctuation via local Ollama model |
+| `subtitles` | Generates SRT + ASS files and burns them into the video |
+| `format` | Converts video to target aspect ratio (9:16, 16:9, etc.) |
+| `metadata` | Generates Instagram and TikTok captions and hashtags via Claude API |
 
 ---
 
-## 📁 Структура виводу
+## ⚙️ Configuration (.env)
+
+```env
+# ─── Auphonic ────────────────────────────────────
+AUPHONIC_API_KEY=your_auphonic_api_key
+REMOVE_AUPHONIC_WATERMARK=true
+
+# ─── Anthropic Claude ────────────────────────────
+ANTHROPIC_API_KEY=your_anthropic_api_key
+
+# ─── WhisperX ────────────────────────────────────
+WHISPER_MODEL=large-v3     # tiny / base / small / medium / large-v3
+WHISPER_DEVICE=cpu         # cpu / cuda
+WHISPER_LANGUAGE=en        # en / uk / ru / de ...
+
+# ─── Subtitles ───────────────────────────────────
+SUBTITLE_FONT_SIZE=60
+SUBTITLE_OUTLINE_SIZE=3
+SUBTITLE_POSITION=bottom   # bottom / top / center
+
+# ─── Video Format ────────────────────────────────
+OUTPUT_FORMAT=9:16         # 9:16 / 16:9 / 1:1 / 4:5 / original
+ADD_PADDING=true           # true = black bars, false = crop
+CONVERT_TO_1080P=true      # convert HEVC/4K to h264 1080p for processing
+```
+
+---
+
+## 📁 Output Structure
 
 ```
 output/
-├── audio_original.wav        # Витягнуте аудіо
-├── audio_enhanced.wav        # Покращене аудіо (Auphonic)
-├── video_enhanced.mp4        # Відео з новим звуком
-├── transcript_raw.json       # Транскрипт з тайм-кодами (JSON)
-├── transcript.txt            # Транскрипт з тайм-кодами (читабельний)
-├── transcript_fixed.json     # Виправлений транскрипт (JSON)
-├── transcript_fixed.txt      # Виправлений транскрипт (читабельний)
-├── subtitles.srt             # Субтитри SRT
-├── subtitles.ass             # Субтитри ASS (стилізовані)
-├── video_subtitled.mp4       # Відео з субтитрами
-├── video_formatted.mp4       # Відформатоване відео
-├── metadata.json             # Назва, підписи, хештеги
-└── pipeline.log              # Лог виконання
+├── audio_original.wav        # Extracted audio
+├── audio_enhanced.wav        # Enhanced audio (Auphonic)
+├── audio_trimmed.wav         # Audio with watermark removed
+├── video_enhanced.mp4        # Video with enhanced audio
+├── video_h264.mp4            # h264 converted for subtitle rendering
+├── transcript_raw.json       # Raw transcript with timestamps (JSON)
+├── transcript.txt            # Raw transcript with timestamps (readable)
+├── transcript_fixed.json     # Corrected transcript (JSON)
+├── transcript_fixed.txt      # Corrected transcript (readable)
+├── subtitles.srt             # SRT subtitle file
+├── subtitles.ass             # ASS subtitle file (styled)
+├── video_subtitled.mp4       # Video with burned-in subtitles
+├── video_formatted.mp4       # Final formatted video
+├── metadata.json             # Title, captions, hashtags
+└── pipeline.log              # Execution log
 ```
 
 ---
 
-## ⚙️ Конфігурація субтитрів (.env)
+## 🔑 API Keys
 
-```env
-SUBTITLE_FONT=Arial
-SUBTITLE_FONT_SIZE=18
-SUBTITLE_COLOR=&H00FFFFFF          # Білий
-SUBTITLE_OUTLINE_COLOR=&H00000000  # Чорна обводка
-SUBTITLE_OUTLINE_SIZE=2
-SUBTITLE_POSITION=bottom           # bottom / top / center
-```
+| Service | Where to get | Cost |
+|---------|-------------|------|
+| **Auphonic** | auphonic.com → Account → API Access | 2 hrs/month free |
+| **Anthropic** | console.anthropic.com → API Keys | ~$0.01 per video |
 
-## ⚙️ Конфігурація формату відео (.env)
-
-```env
-OUTPUT_FORMAT=9:16     # 16:9 / 9:16 / 1:1 / 4:5 / original
-ADD_PADDING=true       # true = чорні поля, false = crop
-PADDING_COLOR=black
-```
+> Ollama runs 100% locally — free and private
 
 ---
 
-## 🐛 Часті проблеми
+## ✂️ Bonus: Video Trimmer
 
-**venv не активовано:**
 ```bash
-# Завжди перевіряй що venv активний (має бути (venv) на початку рядка)
+# Trim first 15 seconds
+python3 trim.py my_video.mov 15
+
+# From second 5 to second 20
+python3 trim.py my_video.mov 15 --start 5
+
+# Custom output file
+python3 trim.py my_video.mov 30 -o short_clip.mp4
+```
+
+---
+
+## 🐛 Troubleshooting
+
+**venv not activated:**
+```bash
 source venv/bin/activate
+# You should see (venv) at the start of the terminal line
 ```
 
-**ffmpeg не знайдено:**
+**Ollama not running:**
 ```bash
-which ffmpeg   # перевір чи встановлено
+brew services start ollama
 ```
 
-**WhisperX не встановлюється:**
-```bash
-pip install torch
-pip install whisperx
-```
-
-**WhisperX дуже повільно на CPU:**
+**WhisperX too slow on CPU:**
 ```env
-# У .env змінити модель на меншу
-WHISPER_MODEL=base    # або small, medium
+WHISPER_MODEL=base    # much faster, slightly lower quality
 ```
 
-**Субтитри не рендеряться:**
+**Font not found (subtitle crosses):**
 ```bash
-fc-list | grep Arial   # перевір наявність шрифту
-# Або змінити у .env:
-SUBTITLE_FONT=DejaVu Sans
+find /System/Library/Fonts -name "*.ttf" | grep -i arial
+# Then set the full path in burn_subtitles → font=
 ```
 
-**Auphonic повертає 401:**
-- Перевір що скопіював API ключ (не логін/пароль) у AUPHONIC_API_KEY
+**ffmpeg not found:**
+```bash
+brew install ffmpeg
+```
