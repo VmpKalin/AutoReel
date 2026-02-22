@@ -67,6 +67,7 @@ class Config:
     SUBTITLE_OUTLINE_COLOR = os.getenv("SUBTITLE_OUTLINE_COLOR", "&H00000000")
     SUBTITLE_OUTLINE_SIZE  = int(os.getenv("SUBTITLE_OUTLINE_SIZE", "2"))
     SUBTITLE_POSITION      = os.getenv("SUBTITLE_POSITION", "bottom")
+    SUBTITLE_BOTTOM_MARGIN = int(os.getenv("SUBTITLE_BOTTOM_MARGIN", "80"))
 
     # Video format
     OUTPUT_FORMAT = os.getenv("OUTPUT_FORMAT", "16:9")
@@ -418,7 +419,7 @@ def generate_ass(segments: list[dict], output_dir: Path) -> Path:
 # ─────────────────────────────────────────────
 def burn_subtitles(video_path: Path, srt_path: Path, output_dir: Path) -> Path:
     output_path = output_dir / "video_subtitled.mp4"
-    log.info("🎬 Burning subtitles via Python (Pillow + MoviePy)...")
+    log.info("🎬 Накладання субтитрів через Python (Pillow + MoviePy)...")
 
     env = os.environ.copy()
     env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
@@ -426,32 +427,39 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_dir: Path) -> Path:
     working_path = output_dir / "video_h264.mp4"
     if cfg.CONVERT_TO_1080P:
         if not working_path.exists():
-            log.info("🔄 Converting HEVC → h264 1080p...")
+            log.info("🔄 Конвертація HEVC → h264 1080p...")
             subprocess.run(
                 f'ffmpeg -y -i "{video_path}" -c:v libx264 -crf 18 -preset fast '
-                f'-vf "scale=1080:1920" -c:a aac "{working_path}"',
+                f'-vf "scale=1080:1920,format=yuv420p" -c:a aac "{working_path}"',
                 shell=True, env=env, capture_output=True
             )
-            log.info("✅ Conversion complete")
+            log.info("✅ Конвертація завершена")
         video = VideoFileClip(str(working_path))
     else:
-        log.info("⏩ Conversion skipped (CONVERT_TO_1080P=false)")
+        log.info("⏩ Конвертація пропущена (CONVERT_TO_1080P=false)")
         video = VideoFileClip(str(video_path))
 
     subs = pysrt.open(str(srt_path))
+    auto_font_size = max(cfg.SUBTITLE_FONT_SIZE, int(video.h * 0.025))
+
+    from moviepy import ColorClip
+    black_bg = ColorClip(
+        size=(video.w, video.h),
+        color=[0, 0, 0],
+        duration=video.duration
+    ).with_fps(video.fps)
 
     subtitle_clips = []
     for sub in subs:
-        start = sub.start.ordinal / 1000.0
-        end   = sub.end.ordinal / 1000.0
+        start    = sub.start.ordinal / 1000.0
+        end      = sub.end.ordinal / 1000.0
         duration = end - start
-
-        # Automatically scale font relative to video height
-        auto_font_size = max(cfg.SUBTITLE_FONT_SIZE, int(video.h * 0.045))
+        if duration <= 0:
+            continue
 
         txt_clip = (
             TextClip(
-                text=sub.text.strip(),
+                text=sub.text.strip() + "\n",  # ← додає місце для descenders
                 font="/System/Library/Fonts/Supplemental/Arial.ttf",
                 font_size=auto_font_size,
                 color="white",
@@ -464,25 +472,47 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_dir: Path) -> Path:
             .with_duration(duration)
         )
 
-        # Subtitle position
         if cfg.SUBTITLE_POSITION == "top":
-            pos = ("center", 50)
+            pos = ("center", cfg.SUBTITLE_BOTTOM_MARGIN)
         elif cfg.SUBTITLE_POSITION == "center":
             pos = ("center", "center")
         else:  # bottom
-            pos = ("center", video.h - txt_clip.h - 60)
+            # Додаємо буфер для stroke + descenders
+            DESCENDER_BUFFER = 20  # пікселів для коми, g, p, y тощо
+            text_height_with_buffer = txt_clip.h + max(cfg.SUBTITLE_OUTLINE_SIZE, 3) * 4 + DESCENDER_BUFFER
+            bottom_y = video.h - text_height_with_buffer - cfg.SUBTITLE_BOTTOM_MARGIN
+            bottom_y = max(bottom_y, cfg.SUBTITLE_BOTTOM_MARGIN)
+            pos = ("center", bottom_y)
 
         subtitle_clips.append(txt_clip.with_position(pos))
 
-    final = CompositeVideoClip([video, *subtitle_clips])
-    final.write_videofile(
-        str(output_path),
+    # Рендеримо тільки субтитри на чорному фоні
+    subtitle_layer_path = output_dir / "subtitle_layer.mp4"
+    subtitle_layer = CompositeVideoClip([black_bg, *subtitle_clips])
+    subtitle_layer.write_videofile(
+        str(subtitle_layer_path),
+        fps=video.fps,
         codec="libx264",
-        audio_codec="aac",
+        audio=False,
+        ffmpeg_params=["-pix_fmt", "yuv420p"],
         logger=None,
     )
+    video.close()
 
-    log.info(f"✅ Video with subtitles: {output_path}")
+    # ffmpeg накладає субтитри поверх оригіналу без зміни кольорів
+    log.info("🎨 Накладання субтитрів через ffmpeg (зберігає кольори)...")
+    result = subprocess.run(
+        f'ffmpeg -y -i "{working_path}" -i "{subtitle_layer_path}" '
+        f'-filter_complex "[1:v]colorkey=0x000000:0.15:0.1[sub];[0:v][sub]overlay" '
+        f'-c:v libx264 -crf 18 -preset fast -c:a copy "{output_path}"',
+        shell=True, env=env, capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        log.error(f"ffmpeg overlay error: {result.stderr}")
+        raise RuntimeError("Помилка накладання субтитрів")
+
+    subtitle_layer_path.unlink(missing_ok=True)
+    log.info(f"✅ Відео з субтитрами: {output_path}")
     return output_path
 
 
@@ -604,7 +634,7 @@ def trim_auphonic_watermark(audio_path: Path, output_dir: Path) -> Path:
 
     if cut_time == 0.0:
         log.info("✅ Watermark not found")
-        return audio_path
+        return audio_path, 0.0
 
     # Trim audio
     trimmed_path = output_dir / "audio_trimmed.wav"
@@ -615,7 +645,36 @@ def trim_auphonic_watermark(audio_path: Path, output_dir: Path) -> Path:
         shell=True, env=env, capture_output=True
     )
     log.info(f"✅ Audio trimmed from {cut_time:.1f}s: {trimmed_path}")
-    return trimmed_path
+    return trimmed_path, cut_time
+
+def remove_subtitle_duplicates(segments: list[dict]) -> list[dict]:
+    """Видаляє дубльований текст між сусідніми сегментами."""
+    if len(segments) < 2:
+        return segments
+
+    for i in range(1, len(segments)):
+        prev_text = segments[i - 1]["text"].strip().lower()
+        curr_text = segments[i]["text"].strip()
+        curr_lower = curr_text.lower()
+
+        # Шукаємо перекриття: кінець попереднього = початок поточного
+        words_prev = prev_text.split()
+        words_curr = curr_lower.split()
+
+        overlap = 0
+        for size in range(min(8, len(words_prev), len(words_curr)), 0, -1):
+            if words_prev[-size:] == words_curr[:size]:
+                overlap = size
+                break
+
+        if overlap > 0:
+            original_words = curr_text.split()
+            segments[i]["text"] = " ".join(original_words[overlap:]).strip()
+            log.info(f"🧹 Видалено дублювання в сегменті {i}: {overlap} слів")
+
+    # Видаляємо порожні сегменти
+    segments = [s for s in segments if s.get("text", "").strip()]
+    return segments
 
 # ─────────────────────────────────────────────
 # Main Pipeline
@@ -644,8 +703,10 @@ def run_pipeline(input_video: str, output_dir: str, steps: list[str] = None):
         state["enhanced_audio"] = state.get("audio", video_path)
 
     if "remove_watermark" in active and "audio" in state and cfg.REMOVE_AUPHONIC_WATERMARK:
-        state["enhanced_audio"] = trim_auphonic_watermark(state["enhanced_audio"], out)
-
+        state["enhanced_audio"], state["audio_cut_time"] = trim_auphonic_watermark(state["enhanced_audio"], out)
+    else:
+        state["audio_cut_time"] = 0.0
+        
     # 3. Merge video + audio
     if "merge" in active and state.get("enhanced_audio") != state.get("audio"):
         state["video"] = merge_audio_video(state["video"], state["enhanced_audio"], out)
@@ -685,9 +746,28 @@ def run_pipeline(input_video: str, output_dir: str, steps: list[str] = None):
         audio_src = state.get("enhanced_audio") or state.get("audio")
         state["segments"] = transcribe(audio_src, out)
 
+    # Фільтруємо сегменти після cut_time (watermark)
+    cut_time = state.get("audio_cut_time", 0.0)
+    if "segments" in state and cut_time > 0:
+        original_count = len(state["segments"])
+        # Зсуваємо тайм-коди і видаляємо watermark сегменти
+        filtered = []
+        for seg in state["segments"]:
+            new_start = seg["start"] - cut_time
+            new_end   = seg["end"] - cut_time
+            if new_end > 0:  # сегмент є в обрізаному відео
+                filtered.append({
+                    **seg,
+                    "start": max(0.0, new_start),
+                    "end":   new_end,
+                })
+        state["segments"] = filtered
+        log.info(f"✂️  Відфільтровано сегментів: {original_count} → {len(filtered)} (cut_time={cut_time:.1f}s)")
+    
     # 5. Text correction
     if "fix" in active and "segments" in state:
         state["segments"] = fix_transcript(state["segments"], out)
+        state["segments"] = remove_subtitle_duplicates(state["segments"])
 
     # 6. Subtitles
     if "subtitles" in active and "segments" in state:
