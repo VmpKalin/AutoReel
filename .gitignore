@@ -25,6 +25,8 @@ output-old/
 *.m4a
 *.aac
 
+*.png
+
 # Transcripts (generated)
 transcript_*.json
 transcript_*.txt

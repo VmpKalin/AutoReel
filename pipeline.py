@@ -4,12 +4,13 @@ Video Processing Pipeline
 =========================
 1. Extract audio
 2. Enhance audio (Auphonic)
-3. Transcription (WhisperX) → save locally
-4. Text correction (Claude API)
-5. Subtitle generation (SRT + ASS)
-6. Burn subtitles into video
-7. Video formatting (padding, crop)
-8. Metadata generation for Instagram + TikTok
+3. Merge enhanced audio into video
+4. Transcription (WhisperX) → save locally
+5. Text correction (Ollama)
+6. Subtitle generation (SRT + ASS)
+7. Burn subtitles into video
+8. Video formatting (padding, crop)
+9. Metadata generation for Instagram + TikTok
 """
 
 import os
@@ -24,8 +25,7 @@ import ollama
 from pathlib import Path
 from datetime import timedelta
 from dotenv import load_dotenv
-import anthropic
-from moviepy import VideoFileClip, TextClip, CompositeVideoClip
+from moviepy import VideoFileClip, TextClip, CompositeVideoClip, ColorClip
 import pysrt
 
 load_dotenv()
@@ -52,16 +52,14 @@ class Config:
     AUPHONIC_API_KEY = os.getenv("AUPHONIC_API_KEY", "")
     AUPHONIC_PRESET  = os.getenv("AUPHONIC_PRESET", "")
 
-    # Anthropic
-    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-
     # WhisperX
     WHISPER_MODEL    = os.getenv("WHISPER_MODEL", "large-v3")
     WHISPER_DEVICE   = os.getenv("WHISPER_DEVICE", "cpu")
-    WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "uk")
+    WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "en")
 
     # Subtitles
-    SUBTITLE_FONT          = os.getenv("SUBTITLE_FONT", "Arial")
+    SUBTITLE_FONT_PATH     = os.getenv("SUBTITLE_FONT_PATH", "/System/Library/Fonts/Supplemental/Impact.ttf")
+    SUBTITLE_FONT          = os.getenv("SUBTITLE_FONT", "Impact")
     SUBTITLE_FONT_SIZE     = int(os.getenv("SUBTITLE_FONT_SIZE", "18"))
     SUBTITLE_COLOR         = os.getenv("SUBTITLE_COLOR", "&H00FFFFFF")
     SUBTITLE_OUTLINE_COLOR = os.getenv("SUBTITLE_OUTLINE_COLOR", "&H00000000")
@@ -70,13 +68,10 @@ class Config:
     SUBTITLE_BOTTOM_MARGIN = int(os.getenv("SUBTITLE_BOTTOM_MARGIN", "80"))
 
     # Video format
-    OUTPUT_FORMAT = os.getenv("OUTPUT_FORMAT", "16:9")
-    ADD_PADDING   = os.getenv("ADD_PADDING", "false").lower() == "true"
-    PADDING_COLOR = os.getenv("PADDING_COLOR", "black")
-    
+    OUTPUT_FORMAT    = os.getenv("OUTPUT_FORMAT", "9:16")
+    ADD_PADDING      = os.getenv("ADD_PADDING", "false").lower() == "true"
+    PADDING_COLOR    = os.getenv("PADDING_COLOR", "black")
     CONVERT_TO_1080P = os.getenv("CONVERT_TO_1080P", "true").lower() == "true"
-
-    REMOVE_AUPHONIC_WATERMARK = os.getenv("REMOVE_AUPHONIC_WATERMARK", "true").lower() == "true"
 
 cfg = Config()
 
@@ -99,7 +94,7 @@ Rules:
 METADATA_PROMPT = """You are a social media content strategist specializing in Instagram and TikTok growth.
 Based on the video transcript, generate optimized metadata for maximum reach and engagement.
 
-Return ONLY JSON, no markdown:
+Return ONLY valid JSON, no markdown, no extra text:
 {
   "title": "Catchy video title under 60 chars, curiosity-driven",
   "instagram_caption": "Engaging caption with hook, value, CTA and relevant hashtags. Max 2200 chars. Use emojis naturally.",
@@ -197,7 +192,6 @@ def enhance_audio_auphonic(audio_path: Path, output_dir: Path) -> Path:
     uuid = resp.json()["data"]["uuid"]
     log.info(f"📤 Production UUID: {uuid}")
 
-    # Poll until completion
     log.info("⏳ Waiting for Auphonic to finish...")
     prod_data = {}
     for _ in range(120):
@@ -267,7 +261,6 @@ def transcribe(audio_path: Path, output_dir: Path) -> list[dict]:
         return_char_alignments=False,
     )
 
-    # Build short segments directly from word_segments
     word_segments = result.get("word_segments", [])
     segments = []
 
@@ -276,11 +269,10 @@ def transcribe(audio_path: Path, output_dir: Path) -> list[dict]:
         MAX_CHARS    = 42
         MAX_DURATION = 3.5
 
-        chunk_words  = []
-        chunk_start  = word_segments[0]["start"]
+        chunk_words = []
+        chunk_start = word_segments[0]["start"]
 
         for word in word_segments:
-            # Skip words without timestamps
             if "start" not in word or "end" not in word:
                 chunk_words.append(word["word"])
                 continue
@@ -306,12 +298,10 @@ def transcribe(audio_path: Path, output_dir: Path) -> list[dict]:
                 "text":  " ".join(chunk_words),
             })
     else:
-        # Fallback — use regular segments
         segments = result["segments"]
 
     log.info(f"✅ Transcription: {len(segments)} subtitle segments")
 
-    # Save files
     raw_json = output_dir / "transcript_raw.json"
     with open(raw_json, "w", encoding="utf-8") as f:
         json.dump(segments, f, ensure_ascii=False, indent=2)
@@ -326,10 +316,9 @@ def transcribe(audio_path: Path, output_dir: Path) -> list[dict]:
 
 
 # ─────────────────────────────────────────────
-# Step 5 — Fix Transcript via Claude
+# Step 5 — Fix Transcript via Ollama
 # ─────────────────────────────────────────────
 def fix_transcript(segments: list[dict], output_dir: Path) -> list[dict]:
-
     log.info("✍️  Fixing text with local model...")
     full_text = "\n".join(f"[{i}] {seg['text']}" for i, seg in enumerate(segments))
 
@@ -358,7 +347,6 @@ def fix_transcript(segments: list[dict], output_dir: Path) -> list[dict]:
         if i in corrected_lines:
             seg["text"] = corrected_lines[i]
 
-    # Save corrected version
     fixed_json = output_dir / "transcript_fixed.json"
     with open(fixed_json, "w", encoding="utf-8") as f:
         json.dump(segments, f, ensure_ascii=False, indent=2)
@@ -369,6 +357,34 @@ def fix_transcript(segments: list[dict], output_dir: Path) -> list[dict]:
             f.write(f"[{format_srt_time(seg['start'])} → {format_srt_time(seg['end'])}] {seg['text'].strip()}\n")
 
     log.info(f"✅ Corrected transcript: {fixed_json}")
+    return segments
+
+
+def remove_subtitle_duplicates(segments: list[dict]) -> list[dict]:
+    """Removes duplicated text between adjacent segments."""
+    if len(segments) < 2:
+        return segments
+
+    for i in range(1, len(segments)):
+        prev_text  = segments[i - 1]["text"].strip().lower()
+        curr_text  = segments[i]["text"].strip()
+        curr_lower = curr_text.lower()
+
+        words_prev = prev_text.split()
+        words_curr = curr_lower.split()
+
+        overlap = 0
+        for size in range(min(8, len(words_prev), len(words_curr)), 0, -1):
+            if words_prev[-size:] == words_curr[:size]:
+                overlap = size
+                break
+
+        if overlap > 0:
+            original_words = curr_text.split()
+            segments[i]["text"] = " ".join(original_words[overlap:]).strip()
+            log.info(f"🧹 Removed duplicate in segment {i}: {overlap} words")
+
+    segments = [s for s in segments if s.get("text", "").strip()]
     return segments
 
 
@@ -414,35 +430,32 @@ def generate_ass(segments: list[dict], output_dir: Path) -> Path:
     log.info(f"✅ ASS subtitles: {ass_path}")
     return ass_path
 
+
 # ─────────────────────────────────────────────
 # Step 7 — Burn Subtitles into Video
 # ─────────────────────────────────────────────
 def burn_subtitles(video_path: Path, srt_path: Path, output_dir: Path) -> Path:
     output_path = output_dir / "video_subtitled.mp4"
-    log.info("🎬 Накладання субтитрів через Python (Pillow + MoviePy)...")
-
-    env = os.environ.copy()
-    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
+    log.info("🎬 Burning subtitles into video...")
 
     working_path = output_dir / "video_h264.mp4"
     if cfg.CONVERT_TO_1080P:
         if not working_path.exists():
-            log.info("🔄 Конвертація HEVC → h264 1080p...")
+            log.info("🔄 Converting to h264 1080p...")
             subprocess.run(
                 f'ffmpeg -y -i "{video_path}" -c:v libx264 -crf 18 -preset fast '
                 f'-vf "scale=1080:1920,format=yuv420p" -c:a aac "{working_path}"',
-                shell=True, env=env, capture_output=True
+                shell=True, capture_output=True
             )
-            log.info("✅ Конвертація завершена")
+            log.info("✅ Conversion done")
         video = VideoFileClip(str(working_path))
     else:
-        log.info("⏩ Конвертація пропущена (CONVERT_TO_1080P=false)")
+        log.info("⏩ Skipping conversion (CONVERT_TO_1080P=false)")
         video = VideoFileClip(str(video_path))
 
     subs = pysrt.open(str(srt_path))
     auto_font_size = max(cfg.SUBTITLE_FONT_SIZE, int(video.h * 0.025))
 
-    from moviepy import ColorClip
     black_bg = ColorClip(
         size=(video.w, video.h),
         color=[0, 0, 0],
@@ -459,8 +472,8 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_dir: Path) -> Path:
 
         txt_clip = (
             TextClip(
-                text=sub.text.strip() + "\n",  # ← додає місце для descenders
-                font="/System/Library/Fonts/Supplemental/Arial.ttf",
+                text=sub.text.strip() + "\n",  # extra line for descenders (g, p, y, ,)
+                font=cfg.SUBTITLE_FONT_PATH,
                 font_size=auto_font_size,
                 color="white",
                 stroke_color="black",
@@ -477,8 +490,7 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_dir: Path) -> Path:
         elif cfg.SUBTITLE_POSITION == "center":
             pos = ("center", "center")
         else:  # bottom
-            # Додаємо буфер для stroke + descenders
-            DESCENDER_BUFFER = 20  # пікселів для коми, g, p, y тощо
+            DESCENDER_BUFFER = 20
             text_height_with_buffer = txt_clip.h + max(cfg.SUBTITLE_OUTLINE_SIZE, 3) * 4 + DESCENDER_BUFFER
             bottom_y = video.h - text_height_with_buffer - cfg.SUBTITLE_BOTTOM_MARGIN
             bottom_y = max(bottom_y, cfg.SUBTITLE_BOTTOM_MARGIN)
@@ -486,7 +498,6 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_dir: Path) -> Path:
 
         subtitle_clips.append(txt_clip.with_position(pos))
 
-    # Рендеримо тільки субтитри на чорному фоні
     subtitle_layer_path = output_dir / "subtitle_layer.mp4"
     subtitle_layer = CompositeVideoClip([black_bg, *subtitle_clips])
     subtitle_layer.write_videofile(
@@ -499,20 +510,19 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_dir: Path) -> Path:
     )
     video.close()
 
-    # ffmpeg накладає субтитри поверх оригіналу без зміни кольорів
-    log.info("🎨 Накладання субтитрів через ffmpeg (зберігає кольори)...")
+    log.info("🎨 Overlaying subtitles via ffmpeg (preserving colors)...")
     result = subprocess.run(
         f'ffmpeg -y -i "{working_path}" -i "{subtitle_layer_path}" '
         f'-filter_complex "[1:v]colorkey=0x000000:0.15:0.1[sub];[0:v][sub]overlay" '
         f'-c:v libx264 -crf 18 -preset fast -c:a copy "{output_path}"',
-        shell=True, env=env, capture_output=True, text=True
+        shell=True, capture_output=True, text=True
     )
     if result.returncode != 0:
         log.error(f"ffmpeg overlay error: {result.stderr}")
-        raise RuntimeError("Помилка накладання субтитрів")
+        raise RuntimeError("Failed to overlay subtitles")
 
     subtitle_layer_path.unlink(missing_ok=True)
-    log.info(f"✅ Відео з субтитрами: {output_path}")
+    log.info(f"✅ Video with subtitles: {output_path}")
     return output_path
 
 
@@ -555,26 +565,19 @@ def format_video(video_path: Path, output_dir: Path, suffix: str = "formatted") 
 # Step 9 — Generate Metadata (Instagram + TikTok)
 # ─────────────────────────────────────────────
 def generate_metadata(segments: list[dict], output_dir: Path) -> dict:
-    if not cfg.ANTHROPIC_API_KEY:
-        log.warning("⚠️  ANTHROPIC_API_KEY is not set, skipping metadata generation")
-        return {}
-
-    log.info("📋 Generating metadata (Instagram + TikTok) via Claude...")
-    client = anthropic.Anthropic(api_key=cfg.ANTHROPIC_API_KEY)
+    log.info("📋 Generating metadata (Instagram + TikTok) via Ollama...")
 
     transcript_preview = " ".join(seg["text"] for seg in segments)[:3000]
 
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1500,
+    message = ollama.chat(
+        model="llama3.1:8b",
         messages=[
-            {"role": "user", "content": METADATA_PROMPT},
-            {"role": "assistant", "content": "Understood. Please provide the video transcript."},
+            {"role": "system", "content": METADATA_PROMPT},
             {"role": "user", "content": f"Video transcript:\n{transcript_preview}"},
-        ],
+        ]
     )
 
-    raw = message.content[0].text.strip().replace("```json", "").replace("```", "").strip()
+    raw = message['message']['content'].strip().replace("```json", "").replace("```", "").strip()
     try:
         metadata = json.loads(raw)
     except json.JSONDecodeError:
@@ -603,78 +606,6 @@ def print_metadata(metadata: dict):
             print(f"\n🔹 {k.upper()}:\n{v}")
     print()
 
-AUPHONIC_WATERMARK_KEYWORDS = [
-    "auphonic", "biophonic", "phonic", 
-    "free audio", "post-production", "post production"
-]
-
-def trim_auphonic_watermark(audio_path: Path, output_dir: Path) -> Path:
-    """Removes Auphonic watermark from the beginning of audio."""
-    try:
-        import whisperx
-    except ImportError:
-        return audio_path
-
-    log.info("🔍 Searching for Auphonic watermark in audio...")
-
-    # Quick transcription of only the first 15 seconds
-    model = whisperx.load_model("base", device=cfg.WHISPER_DEVICE, compute_type="float32")
-    audio = whisperx.load_audio(str(audio_path))
-    audio_preview = audio[:15 * 16000]  # first 15 seconds
-    result = model.transcribe(audio_preview, language="en", batch_size=16)
-
-    # Find where watermark ends
-    cut_time = 0.0
-    for seg in result["segments"]:
-        text_lower = seg["text"].lower()
-        is_watermark = any(kw in text_lower for kw in AUPHONIC_WATERMARK_KEYWORDS)
-        if is_watermark:
-            cut_time = seg["end"]
-            log.info(f"🎯 Watermark found: '{seg['text'].strip()}' → trimming to {cut_time:.1f}s")
-
-    if cut_time == 0.0:
-        log.info("✅ Watermark not found")
-        return audio_path, 0.0
-
-    # Trim audio
-    trimmed_path = output_dir / "audio_trimmed.wav"
-    env = os.environ.copy()
-    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
-    subprocess.run(
-        f'ffmpeg -y -i "{audio_path}" -ss {cut_time:.3f} -c copy "{trimmed_path}"',
-        shell=True, env=env, capture_output=True
-    )
-    log.info(f"✅ Audio trimmed from {cut_time:.1f}s: {trimmed_path}")
-    return trimmed_path, cut_time
-
-def remove_subtitle_duplicates(segments: list[dict]) -> list[dict]:
-    """Видаляє дубльований текст між сусідніми сегментами."""
-    if len(segments) < 2:
-        return segments
-
-    for i in range(1, len(segments)):
-        prev_text = segments[i - 1]["text"].strip().lower()
-        curr_text = segments[i]["text"].strip()
-        curr_lower = curr_text.lower()
-
-        # Шукаємо перекриття: кінець попереднього = початок поточного
-        words_prev = prev_text.split()
-        words_curr = curr_lower.split()
-
-        overlap = 0
-        for size in range(min(8, len(words_prev), len(words_curr)), 0, -1):
-            if words_prev[-size:] == words_curr[:size]:
-                overlap = size
-                break
-
-        if overlap > 0:
-            original_words = curr_text.split()
-            segments[i]["text"] = " ".join(original_words[overlap:]).strip()
-            log.info(f"🧹 Видалено дублювання в сегменті {i}: {overlap} слів")
-
-    # Видаляємо порожні сегменти
-    segments = [s for s in segments if s.get("text", "").strip()]
-    return segments
 
 # ─────────────────────────────────────────────
 # Main Pipeline
@@ -688,7 +619,7 @@ def run_pipeline(input_video: str, output_dir: str, steps: list[str] = None):
     log.info(f"🚀 Starting pipeline for: {video_path.name}")
     log.info(f"📁 Output directory: {out}")
 
-    all_steps = ["audio", "enhance", "remove_watermark", "merge", "transcribe", "fix", "subtitles", "format", "metadata"]
+    all_steps = ["audio", "enhance", "merge", "transcribe", "fix", "subtitles", "format", "metadata"]
     active = set(steps) if steps else set(all_steps)
     state  = {"video": video_path}
 
@@ -702,16 +633,10 @@ def run_pipeline(input_video: str, output_dir: str, steps: list[str] = None):
     else:
         state["enhanced_audio"] = state.get("audio", video_path)
 
-    if "remove_watermark" in active and "audio" in state and cfg.REMOVE_AUPHONIC_WATERMARK:
-        state["enhanced_audio"], state["audio_cut_time"] = trim_auphonic_watermark(state["enhanced_audio"], out)
-    else:
-        state["audio_cut_time"] = 0.0
-        
     # 3. Merge video + audio
     if "merge" in active and state.get("enhanced_audio") != state.get("audio"):
         state["video"] = merge_audio_video(state["video"], state["enhanced_audio"], out)
     else:
-        # Priority: subtitled → enhanced → original
         video_subtitled = out / "video_subtitled.mp4"
         video_enhanced  = out / "video_enhanced.mp4"
 
@@ -727,10 +652,10 @@ def run_pipeline(input_video: str, output_dir: str, steps: list[str] = None):
                 shutil.copy2(video_path, dest)
             state["video"] = dest
             log.info(f"📂 Using original video: {dest}")
-        
+
     # Load existing transcript if present
     fixed_json = out / "transcript_fixed.json"
-    raw_json = out / "transcript_raw.json"
+    raw_json   = out / "transcript_raw.json"
     if "transcribe" not in active:
         if fixed_json.exists():
             with open(fixed_json, encoding="utf-8") as f:
@@ -741,29 +666,11 @@ def run_pipeline(input_video: str, output_dir: str, steps: list[str] = None):
                 state["segments"] = json.load(f)
             log.info(f"📂 Loaded existing transcript: {raw_json}")
 
-    # 4. Transcription → save locally
+    # 4. Transcription
     if "transcribe" in active:
         audio_src = state.get("enhanced_audio") or state.get("audio")
         state["segments"] = transcribe(audio_src, out)
 
-    # Фільтруємо сегменти після cut_time (watermark)
-    cut_time = state.get("audio_cut_time", 0.0)
-    if "segments" in state and cut_time > 0:
-        original_count = len(state["segments"])
-        # Зсуваємо тайм-коди і видаляємо watermark сегменти
-        filtered = []
-        for seg in state["segments"]:
-            new_start = seg["start"] - cut_time
-            new_end   = seg["end"] - cut_time
-            if new_end > 0:  # сегмент є в обрізаному відео
-                filtered.append({
-                    **seg,
-                    "start": max(0.0, new_start),
-                    "end":   new_end,
-                })
-        state["segments"] = filtered
-        log.info(f"✂️  Відфільтровано сегментів: {original_count} → {len(filtered)} (cut_time={cut_time:.1f}s)")
-    
     # 5. Text correction
     if "fix" in active and "segments" in state:
         state["segments"] = fix_transcript(state["segments"], out)
@@ -779,7 +686,7 @@ def run_pipeline(input_video: str, output_dir: str, steps: list[str] = None):
     if "format" in active:
         state["video"] = format_video(state["video"], out)
 
-    # 8. Instagram + TikTok metadata
+    # 8. Metadata
     if "metadata" in active and "segments" in state:
         state["metadata"] = generate_metadata(state["segments"], out)
         print_metadata(state["metadata"])
@@ -803,7 +710,7 @@ def main():
                         help="Output directory (default: ./output)")
     parser.add_argument(
         "--steps", nargs="+",
-        choices=["audio", "enhance", "remove_watermark", "merge", "transcribe", "fix", "subtitles", "format", "metadata"],
+        choices=["audio", "enhance", "merge", "transcribe", "fix", "subtitles", "format", "metadata"],
         help="Run only specified steps (default: all)",
     )
     args = parser.parse_args()
