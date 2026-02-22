@@ -78,6 +78,8 @@ class Config:
     PADDING_COLOR    = os.getenv("PADDING_COLOR", "black")
     CONVERT_TO_1080P = os.getenv("CONVERT_TO_1080P", "true").lower() == "true"
 
+    VIDEO_SPEED = float(os.getenv("VIDEO_SPEED", "1.0"))  # 1.0 = normal, 1.5 = 1.5x, 2.0 = 2x
+
 cfg = Config()
 
 
@@ -275,12 +277,16 @@ def transcribe(audio_path: Path, output_dir: Path) -> list[dict]:
         MAX_DURATION = 3.5
 
         chunk_words = []
-        chunk_start = word_segments[0]["start"]
+        chunk_start = None  # буде встановлено з реального початку першого слова
 
         for word in word_segments:
             if "start" not in word or "end" not in word:
                 chunk_words.append(word["word"])
                 continue
+
+            # Встановлюємо start з реального початку першого слова в chunk
+            if chunk_start is None:
+                chunk_start = word["start"]
 
             chunk_words.append(word["word"])
             chunk_text = " ".join(chunk_words)
@@ -293,9 +299,9 @@ def transcribe(audio_path: Path, output_dir: Path) -> list[dict]:
                     "text":  chunk_text,
                 })
                 chunk_words = []
-                chunk_start = word["end"]
+                chunk_start = None  # скидаємо, наступне слово встановить новий start
 
-        if chunk_words:
+        if chunk_words and chunk_start is not None:
             last_end = word_segments[-1].get("end", chunk_start + 1)
             segments.append({
                 "start": chunk_start,
@@ -650,6 +656,40 @@ def send_metadata_to_telegram(metadata: dict, video_name: str):
     else:
         log.warning(f"⚠️  Telegram error: {resp.text}")
 
+def speed_up_video(video_path: Path, output_dir: Path) -> Path:
+    if cfg.VIDEO_SPEED == 1.0:
+        log.info("⏩ Speed change skipped (VIDEO_SPEED=1.0)")
+        return video_path
+
+    output_path = output_dir / f"video_speed_{cfg.VIDEO_SPEED}x.mp4"
+    log.info(f"⚡ Changing video speed to {cfg.VIDEO_SPEED}x...")
+
+    # setpts для відео, atempo для аудіо (підтримує 0.5-2.0)
+    pts = 1.0 / cfg.VIDEO_SPEED
+    
+    # atempo підтримує тільки 0.5-2.0, для більших значень каскадуємо
+    speed = cfg.VIDEO_SPEED
+    atempo_filters = []
+    while speed > 2.0:
+        atempo_filters.append("atempo=2.0")
+        speed /= 2.0
+    while speed < 0.5:
+        atempo_filters.append("atempo=0.5")
+        speed /= 0.5
+    atempo_filters.append(f"atempo={speed:.4f}")
+    atempo = ",".join(atempo_filters)
+
+    run(
+        f'ffmpeg -y -i "{video_path}" '
+        f'-filter_complex "[0:v]setpts={pts:.4f}*PTS[v];[0:a]{atempo}[a]" '
+        f'-map "[v]" -map "[a]" '
+        f'-c:v libx264 -crf 18 -preset fast "{output_path}"',
+        f"Speed change → {cfg.VIDEO_SPEED}x",
+    )
+
+    log.info(f"✅ Speed changed: {output_path}")
+    return output_path
+
 # ─────────────────────────────────────────────
 # Main Pipeline
 # ─────────────────────────────────────────────
@@ -662,7 +702,7 @@ def run_pipeline(input_video: str, output_dir: str, steps: list[str] = None):
     log.info(f"🚀 Starting pipeline for: {video_path.name}")
     log.info(f"📁 Output directory: {out}")
 
-    all_steps = ["audio", "enhance", "merge", "transcribe", "fix", "subtitles", "format", "metadata"]
+    all_steps = ["audio", "enhance", "merge", "transcribe", "fix", "subtitles", "format", "speed", "metadata"]
     active = set(steps) if steps else set(all_steps)
     state  = {"video": video_path}
 
@@ -729,7 +769,11 @@ def run_pipeline(input_video: str, output_dir: str, steps: list[str] = None):
     if "format" in active:
         state["video"] = format_video(state["video"], out)
 
-    # 8. Metadata
+    # 8. Speed
+    if "speed" in active:
+        state["video"] = speed_up_video(state["video"], out)
+
+    # 9. Metadata
     if "metadata" in active and "segments" in state:
         state["metadata"] = generate_metadata(state["segments"], out)
         print_metadata(state["metadata"])
@@ -754,7 +798,7 @@ def main():
                         help="Output directory (default: ./output)")
     parser.add_argument(
         "--steps", nargs="+",
-        choices=["audio", "enhance", "merge", "transcribe", "fix", "subtitles", "format", "metadata"],
+        choices=["audio", "enhance", "merge", "transcribe", "fix", "subtitles", "format", "speed", "metadata"],
         help="Run only specified steps (default: all)",
     )
     args = parser.parse_args()
