@@ -14,6 +14,7 @@ Video Processing Pipeline
 """
 
 import os
+import re
 import json
 import time
 import shutil
@@ -51,6 +52,10 @@ class Config:
     # Auphonic
     AUPHONIC_API_KEY = os.getenv("AUPHONIC_API_KEY", "")
     AUPHONIC_PRESET  = os.getenv("AUPHONIC_PRESET", "")
+
+
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 
     # WhisperX
     WHISPER_MODEL    = os.getenv("WHISPER_MODEL", "large-v3")
@@ -440,18 +445,14 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_dir: Path) -> Path:
 
     working_path = output_dir / "video_h264.mp4"
     if cfg.CONVERT_TO_1080P:
-        if not working_path.exists():
-            log.info("🔄 Converting to h264 1080p...")
-            subprocess.run(
-                f'ffmpeg -y -i "{video_path}" -c:v libx264 -crf 18 -preset fast '
-                f'-vf "scale=1080:1920,format=yuv420p" -c:a aac "{working_path}"',
-                shell=True, capture_output=True
-            )
-            log.info("✅ Conversion done")
+        log.info("🔄 Converting to h264 1080p...")
+        subprocess.run(
+            f'ffmpeg -y -i "{video_path}" -c:v libx264 -crf 18 -preset fast '
+            f'-vf "scale=1080:1920,format=yuv420p" -c:a aac "{working_path}"',
+            shell=True, capture_output=True
+        )
+        log.info("✅ Conversion done")
         video = VideoFileClip(str(working_path))
-    else:
-        log.info("⏩ Skipping conversion (CONVERT_TO_1080P=false)")
-        video = VideoFileClip(str(video_path))
 
     subs = pysrt.open(str(srt_path))
     auto_font_size = max(cfg.SUBTITLE_FONT_SIZE, int(video.h * 0.025))
@@ -577,11 +578,19 @@ def generate_metadata(segments: list[dict], output_dir: Path) -> dict:
         ]
     )
 
-    raw = message['message']['content'].strip().replace("```json", "").replace("```", "").strip()
+    raw = message['message']['content'].strip()
+
+    # Витягуємо JSON навіть якщо є текст навколо
+    json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if json_match:
+        raw = json_match.group(0)
+
+    raw = raw.replace("```json", "").replace("```", "").strip()
+
     try:
         metadata = json.loads(raw)
-    except json.JSONDecodeError:
-        log.warning("⚠️  Failed to parse metadata as JSON")
+    except json.JSONDecodeError as e:
+        log.warning(f"⚠️  Failed to parse metadata as JSON: {e}")
         metadata = {"raw": raw}
 
     metadata_path = output_dir / "metadata.json"
@@ -606,6 +615,40 @@ def print_metadata(metadata: dict):
             print(f"\n🔹 {k.upper()}:\n{v}")
     print()
 
+def send_metadata_to_telegram(metadata: dict, video_name: str):
+    token   = cfg.TELEGRAM_BOT_TOKEN
+    chat_id = cfg.TELEGRAM_CHAT_ID
+
+    if not token or not chat_id:
+        log.warning("⚠️  TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set, skipping")
+        return
+
+    hashtags_ig  = " ".join(f"#{t}" for t in metadata.get("instagram_hashtags", []))
+    hashtags_tt  = " ".join(f"#{t}" for t in metadata.get("tiktok_hashtags", []))
+
+    text = (
+        f"🎬 *{video_name}*\n\n"
+        f"📌 *Title:* {metadata.get('title', '')}\n\n"
+        f"📝 *Summary:* {metadata.get('short_summary', '')}\n\n"
+        f"📸 *Instagram caption:*\n{metadata.get('instagram_caption', '')}\n\n"
+        f"🏷 *Instagram hashtags:*\n{hashtags_ig}\n\n"
+        f"🎵 *TikTok caption:*\n{metadata.get('tiktok_caption', '')}\n\n"
+        f"🏷 *TikTok hashtags:*\n{hashtags_tt}"
+    )
+
+    resp = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+        }
+    )
+
+    if resp.status_code == 200:
+        log.info("✅ Metadata sent to Telegram")
+    else:
+        log.warning(f"⚠️  Telegram error: {resp.text}")
 
 # ─────────────────────────────────────────────
 # Main Pipeline
@@ -690,6 +733,7 @@ def run_pipeline(input_video: str, output_dir: str, steps: list[str] = None):
     if "metadata" in active and "segments" in state:
         state["metadata"] = generate_metadata(state["segments"], out)
         print_metadata(state["metadata"])
+        send_metadata_to_telegram(state["metadata"], video_path.name)
 
     log.info("\n" + "=" * 55)
     log.info("🎉 PIPELINE COMPLETED!")
