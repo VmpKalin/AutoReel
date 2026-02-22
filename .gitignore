@@ -1,0 +1,45 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+
+# Pipeline output
+output/
+output-old/
+*.log
+
+# Video & audio files
+*.mov
+*.mp4
+*.wav
+*.mp3
+*.m4a
+*.aac
+
+# Transcripts (generated)
+transcript_*.json
+transcript_*.txt
+subtitles.*
+metadata.json
+reels_timestamps.json
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# VSCode
+.vscode/
+
+# Models cache (WhisperX downloads)
+~/.cache/whisperx/
+~/.cache/huggingface/

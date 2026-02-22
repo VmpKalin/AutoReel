@@ -1,0 +1,13 @@
+# Core
+anthropic>=0.40.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Transcription (вибери один або обидва)
+# WhisperX (потребує torch, краще з GPU)
+whisperx>=3.1.1
+torch>=2.0.0
+
+moviepy
+Pillow
+pysrt
