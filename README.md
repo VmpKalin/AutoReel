@@ -71,6 +71,8 @@ python3 pipeline.py my_video.mov --steps fix subtitles format metadata
 python3 pipeline.py my_video.mov -o ./results
 ```
 
+If the chosen output folder already contains files, the pipeline automatically creates an incremented folder (for example `output_1`, `output_2`, `results_1`) to avoid overwriting previous runs.
+
 ---
 
 ## 📋 Pipeline Steps

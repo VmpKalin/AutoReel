@@ -134,6 +134,28 @@ def ensure_dir(path: Path) -> Path:
     return path
 
 
+def resolve_output_dir(requested_output_dir: str | Path) -> Path:
+    base_dir = Path(requested_output_dir).resolve()
+    ensure_dir(base_dir)
+
+    if not any(item.is_file() for item in base_dir.iterdir()):
+        return base_dir
+
+    parent = base_dir.parent
+    stem = base_dir.name
+    idx = 1
+    while True:
+        candidate = parent / f"{stem}_{idx}"
+        if not candidate.exists():
+            ensure_dir(candidate)
+            log.info(f"📁 Output directory has files, using: {candidate}")
+            return candidate
+        if candidate.is_dir() and not any(item.is_file() for item in candidate.iterdir()):
+            log.info(f"📁 Output directory has files, using: {candidate}")
+            return candidate
+        idx += 1
+
+
 def format_srt_time(seconds: float) -> str:
     td = timedelta(seconds=seconds)
     total_ms = int(td.total_seconds() * 1000)
@@ -460,6 +482,7 @@ def burn_subtitles(video_path: Path, srt_path: Path, output_dir: Path) -> Path:
         log.info("✅ Conversion done")
         video = VideoFileClip(str(working_path))
 
+    log.info("🔄 Create subtitles for video")
     subs = pysrt.open(str(srt_path))
     auto_font_size = max(cfg.SUBTITLE_FONT_SIZE, int(video.h * 0.025))
 
@@ -542,7 +565,6 @@ ASPECT_RATIOS = {
     "1:1":  (1080, 1080),
     "4:5":  (1080, 1350),
 }
-
 
 def format_video(video_path: Path, output_dir: Path, suffix: str = "formatted") -> Path:
     if cfg.OUTPUT_FORMAT == "original" and not cfg.ADD_PADDING:
@@ -698,7 +720,7 @@ def run_pipeline(input_video: str, output_dir: str, steps: list[str] = None):
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
 
-    out = ensure_dir(Path(output_dir))
+    out = resolve_output_dir(output_dir)
     log.info(f"🚀 Starting pipeline for: {video_path.name}")
     log.info(f"📁 Output directory: {out}")
 

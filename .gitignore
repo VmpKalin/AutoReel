@@ -18,6 +18,7 @@ output-old/
 *.log
 
 # Video & audio files
+*.mkv
 *.mov
 *.mp4
 *.wav
